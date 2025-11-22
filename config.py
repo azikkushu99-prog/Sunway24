@@ -78,6 +78,7 @@ CONTACT_FIELDS = {
     'description': 'UF_CRM_1732543720',
     'telegram_id': 'UF_CRM_1731051977',
     'telegram_username': 'UF_CRM_1731051966',
+    'email': 'UF_CRM_5F02275DA7BD0',
 }
 
 CATEGORY_CACHE = {}
