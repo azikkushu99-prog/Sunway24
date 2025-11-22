@@ -98,7 +98,7 @@ async def find_client_by_phone(phone: str):
     for variant in phone_variants:
         params = {
             'filter': {'PHONE': variant},
-            'select': ['ID', 'NAME', 'LAST_NAME', 'EMAIL', 'PHONE']
+            'select': ['ID', 'NAME', 'LAST_NAME', 'EMAIL', 'PHONE']  # ← КАК БЫЛО
         }
         result = await bitrix_request('crm.contact.list', params)
         if result:
@@ -1134,11 +1134,24 @@ async def process_phone(message: Message, state: FSMContext):
             client.get('LAST_NAME', '')
         )
 
+        # Получаем полные данные контакта для email
+        email_params = {
+            'ID': client['ID']
+        }
+        contact_data = await bitrix_request('crm.contact.get', email_params)
+
+        email_value = 'Не указан'
+        if contact_data and 'EMAIL' in contact_data:
+            # EMAIL - это массив, берем первый email
+            email_list = contact_data.get('EMAIL', [])
+            if email_list and len(email_list) > 0:
+                email_value = email_list[0].get('VALUE', 'Не указан')
+
         user_phones[user_id] = {
             'phone': phone,
             'client_id': client['ID'],
             'name': full_name,
-            'email': client.get('EMAIL', [{}])[0].get('VALUE', 'Не указан')
+            'email': email_value  # ← Теперь берем из стандартного поля EMAIL
         }
 
         await message.answer(
@@ -1159,6 +1172,7 @@ async def process_phone(message: Message, state: FSMContext):
             ]),
             parse_mode="HTML"
         )
+
 
 
 async def show_main_menu(message: Message):
@@ -1652,7 +1666,7 @@ async def show_profile(callback: CallbackQuery):
     text = f"👤 <b>Профиль клиента</b>\n\n"
     text += f"📝 <b>ФИО:</b> {user_data['name']}\n"
     text += f"📱 <b>Телефон:</b> {user_data['phone']}\n"
-    text += f"✉️ <b>Email:</b> {user_data['email']}\n"
+    text += f"✉️ <b>Email:</b> {user_data['email']}\n"  # ← Здесь уже используется правильное значение
     text += f"🆔 <b>ID клиента:</b> {user_data['client_id']}\n"
 
     await callback.message.edit_text(
