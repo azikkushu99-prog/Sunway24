@@ -26,7 +26,7 @@ from config import (
 # ====== НАСТРОЙКИ ======
 BOT_TOKEN = "8258111612:AAEmqjXRxRlcKAuiBDgLilOOBlz_CmLvmIg"
 BITRIX_WEBHOOK = "https://sunway24.bitrix24.ru/rest/326/fiwux7q90yclt8l1/"
-ADMIN_IDS = [785219206, 1291085389]
+ADMIN_IDS = [999232338, 1291085389]
 
 # Директории для файлов
 INVOICES_DIR = "invoices"
