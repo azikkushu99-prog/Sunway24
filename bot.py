@@ -1652,7 +1652,6 @@ async def consultation(callback: CallbackQuery):
     )
     await callback.answer()
 
-
 @dp.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
     """Профиль клиента"""
