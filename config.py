@@ -32,30 +32,35 @@ STATUS_EMOJI = {
     'LOSE': '❌'
 }
 
+# ✅ ИСПРАВЛЕННЫЕ ID ПОЛЕЙ (сопоставлены с реальными данными API)
 BITRIX_FIELDS = {
+    # Основные поля (НОВЫЕ ID - работают у всех пользователей)
+    'weight': 'UF_CRM_1764049517590',  # Общий вес
+    'volume': 'UF_CRM_1764049564263',  # Общий объем
+    'expected_send_date': 'UF_CRM_1764049614030',  # Ориентировочная дата отправки
+    'expected_arrival_date': 'UF_CRM_1764049649086',  # Ориентировочная дата прибытия
+    'insurance': 'UF_CRM_1764049805679',  # Страховка
+    'cargo_marking': 'UF_CRM_1764049909974',  # Маркировка груза
+    'product_category': 'UF_CRM_1764050074878',  # Категория товара
+    'invoice_cost': 'UF_CRM_1764050233702',  # Стоимость товара
+    'arrival_city': 'UF_CRM_1764050267877',  # Город прибытия
+
+    # Старые поля (оставляем для совместимости, но они могут не работать у всех)
     'client_id': 'UF_CRM_1591163139028',
-    'weight': 'UF_CRM_5EC95CA4927AD',
-    'volume': 'UF_CRM_5EC95CA49C77A',
-    'product_category': 'UF_CRM_1756292648096',
-    'insurance': 'UF_CRM_1763055236',
-    'expected_send_date': 'UF_CRM_1756354874082',
-    'expected_arrival_date': 'UF_CRM_1756354958786',
     'description': 'UF_CRM_5EC95CA4AB01F',
     'product_name': 'UF_CRM_5ED34C9E0DBA1',
     'units_count': 'UF_CRM_1756292836599',
     'expected_customs_date': 'UF_CRM_1756354903725',
-    'arrival_city': 'UF_CRM_1763636928',
-    'cargo_marking': 'UF_CRM_1763637127',
     'goods_ready_date': 'UF_CRM_1756355066065',
     'expected_customs_arrival': 'UF_CRM_1758264099921',
-    'invoice_cost': 'UF_CRM_1763621151',
     'expenses': 'UF_CRM_1756292847087',
     'profit': 'UF_CRM_1756292927',
 
-    # ✅ ИСПРАВЛЕННЫЕ ПОЛЯ ДЛЯ ФАЙЛОВ (найдены через диагностику):
-    'invoice_file': 'UF_CRM_1763119515',  # Накладная
-    'product_photos': 'UF_CRM_1763119545',  # Фото товара
+    # Файлы
+    'invoice_file': 'UF_CRM_1763119515',
+    'product_photos': 'UF_CRM_1763119545',
 
+    # Документы
     'commercial_offer': 'UF_CRM_1756295296052',
     'contract': 'UF_CRM_1756295338716',
     'specification': 'UF_CRM_1756295360556',
@@ -115,7 +120,8 @@ async def get_category_name(category_id: str):
     if category_id in CATEGORY_CACHE:
         return CATEGORY_CACHE[category_id]
 
-    name = await get_list_item_name('UF_CRM_1756292648096', category_id)
+    # Используем новый ID поля категории
+    name = await get_list_item_name('UF_CRM_1764050074878', category_id)
     CATEGORY_CACHE[category_id] = name
     return name
 
