@@ -32,6 +32,9 @@ ADMIN_IDS = [999232338, 1291085389, 785219206]
 INVOICES_DIR = "invoices"
 PHOTOS_DIR = "product_photos"
 
+# Пагинация
+DEALS_PER_PAGE = 10
+
 # Логирование
 logging.basicConfig(
     level=logging.INFO,
@@ -87,6 +90,23 @@ async def bitrix_request(method: str, params: dict = None):
         return None
 
 
+async def bitrix_request_full(method: str, params: dict = None):
+    """Запрос к Битрикс24 с полным ответом (для пагинации)"""
+    url = f"{BITRIX_WEBHOOK}{method}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=params or {}) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    text = await response.text()
+                    logger.error(f"Bitrix error {response.status}: {text}")
+                    return None
+    except Exception as e:
+        logger.error(f"Request error: {e}")
+        return None
+
+
 async def find_client_by_phone(phone: str):
     """Поиск клиента в Битрикс по телефону"""
     cleaned_phone = clean_phone(phone)
@@ -98,59 +118,137 @@ async def find_client_by_phone(phone: str):
     for variant in phone_variants:
         params = {
             'filter': {'PHONE': variant},
-            'select': ['ID', 'NAME', 'LAST_NAME', 'EMAIL', 'PHONE']  # ← КАК БЫЛО
+            'select': ['ID', 'NAME', 'LAST_NAME', 'EMAIL', 'PHONE']
         }
         result = await bitrix_request('crm.contact.list', params)
         if result:
-            return result[0]
+            contact = result[0]
+            logger.info(
+                f"Найден контакт: ID={contact.get('ID')}, {contact.get('NAME')} {contact.get('LAST_NAME')}, тел: {variant}")
+            if len(result) > 1:
+                logger.warning(f"ВНИМАНИЕ: Найдено {len(result)} контактов с телефоном {variant}!")
+                for c in result:
+                    logger.info(f"  - ID:{c.get('ID')} | {c.get('NAME')} {c.get('LAST_NAME')}")
+            return contact
     return None
 
 
+async def find_all_clients_by_phone(phone: str):
+    """Поиск ВСЕХ клиентов в Битрикс по телефону (для дублей)"""
+    cleaned_phone = clean_phone(phone)
+    phone_variants = [
+        cleaned_phone,
+        f"+{cleaned_phone}",
+        f"8{cleaned_phone[1:]}",
+    ]
+    all_contacts = []
+    seen_ids = set()
+
+    for variant in phone_variants:
+        params = {
+            'filter': {'PHONE': variant},
+            'select': ['ID', 'NAME', 'LAST_NAME', 'EMAIL', 'PHONE']
+        }
+        result = await bitrix_request('crm.contact.list', params)
+        if result:
+            for contact in result:
+                if contact['ID'] not in seen_ids:
+                    seen_ids.add(contact['ID'])
+                    all_contacts.append(contact)
+
+    if all_contacts:
+        logger.info(f"Найдено контактов по телефону: {len(all_contacts)}")
+        for c in all_contacts:
+            logger.info(f"  - ID:{c.get('ID')} | {c.get('NAME')} {c.get('LAST_NAME')}")
+
+    return all_contacts
+
+
 async def get_active_deals(client_id: str):
-    """Получение активных заказов клиента"""
-    params = {
-        'filter': {
-            'CONTACT_ID': client_id,
-            'CLOSED': 'N'
-        },
-        'select': [
-            'ID', 'TITLE', 'DATE_CREATE', 'STAGE_ID', 'OPPORTUNITY',
-            BITRIX_FIELDS['client_id'],
-            BITRIX_FIELDS['weight'],
-            BITRIX_FIELDS['volume'],
-            BITRIX_FIELDS['product_category'],
-            BITRIX_FIELDS['expected_send_date'],
-            BITRIX_FIELDS['expected_arrival_date'],
-            BITRIX_FIELDS['insurance'],
-            BITRIX_FIELDS['invoice_file'],
-            BITRIX_FIELDS['product_photos'],
-            BITRIX_FIELDS['invoice_cost']  # ✅ Убедитесь, что это поле здесь есть
-        ]
-    }
-    return await bitrix_request('crm.deal.list', params) or []
+    """Получение всех активных заказов клиента с пагинацией"""
+    all_deals = []
+    start = 0
+
+    while True:
+        params = {
+            'filter': {
+                'CONTACT_ID': client_id,
+                'CLOSED': 'N'
+            },
+            'select': [
+                'ID', 'TITLE', 'DATE_CREATE', 'STAGE_ID', 'OPPORTUNITY', 'CLOSED',
+                BITRIX_FIELDS['client_id'],
+                BITRIX_FIELDS['weight'],
+                BITRIX_FIELDS['volume'],
+                BITRIX_FIELDS['product_category'],
+                BITRIX_FIELDS['expected_send_date'],
+                BITRIX_FIELDS['expected_arrival_date'],
+                BITRIX_FIELDS['insurance'],
+                BITRIX_FIELDS['invoice_file'],
+                BITRIX_FIELDS['product_photos'],
+                BITRIX_FIELDS['invoice_cost']
+            ],
+            'start': start
+        }
+        response = await bitrix_request_full('crm.deal.list', params)
+
+        if not response:
+            break
+
+        result = response.get('result', [])
+
+        if result:
+            all_deals.extend(result)
+
+        if 'next' not in response:
+            break
+
+        start = response['next']
+
+    logger.info(f"Активных сделок для контакта {client_id}: {len(all_deals)}")
+    return all_deals
 
 
 async def get_archived_deals(client_id: str):
-    """Получение завершенных заказов"""
-    params = {
-        'filter': {
-            'CONTACT_ID': client_id,
-            'CLOSED': 'Y'
-        },
-        'select': [
-            'ID', 'TITLE', 'DATE_CREATE', 'DATE_MODIFY', 'STAGE_ID', 'OPPORTUNITY',
-            'CURRENCY_ID',  # ← ДОБАВИТЬ ЭТО ПОЛЕ
-            BITRIX_FIELDS['client_id'],
-            BITRIX_FIELDS['weight'],
-            BITRIX_FIELDS['volume'],
-            BITRIX_FIELDS['product_category'],
-            BITRIX_FIELDS['expected_send_date'],
-            BITRIX_FIELDS['expected_arrival_date'],
-            BITRIX_FIELDS['insurance'],
-            BITRIX_FIELDS['invoice_cost']
-        ]
-    }
-    return await bitrix_request('crm.deal.list', params) or []
+    """Получение всех завершенных заказов с пагинацией"""
+    all_deals = []
+    start = 0
+
+    while True:
+        params = {
+            'filter': {
+                'CONTACT_ID': client_id,
+                'CLOSED': 'Y'
+            },
+            'select': [
+                'ID', 'TITLE', 'DATE_CREATE', 'DATE_MODIFY', 'STAGE_ID', 'OPPORTUNITY',
+                'CURRENCY_ID',
+                BITRIX_FIELDS['client_id'],
+                BITRIX_FIELDS['weight'],
+                BITRIX_FIELDS['volume'],
+                BITRIX_FIELDS['product_category'],
+                BITRIX_FIELDS['expected_send_date'],
+                BITRIX_FIELDS['expected_arrival_date'],
+                BITRIX_FIELDS['insurance'],
+                BITRIX_FIELDS['invoice_cost']
+            ],
+            'start': start
+        }
+        response = await bitrix_request_full('crm.deal.list', params)
+
+        if not response:
+            break
+
+        result = response.get('result', [])
+        if result:
+            all_deals.extend(result)
+
+        if 'next' not in response:
+            break
+
+        start = response['next']
+
+    return all_deals
 
 
 async def get_deal_details(deal_id: str):
@@ -159,7 +257,7 @@ async def get_deal_details(deal_id: str):
         'ID': deal_id,
         'select': [
             'ID', 'TITLE', 'DATE_CREATE', 'STAGE_ID', 'OPPORTUNITY',
-            'CURRENCY_ID',  # ← ДОБАВИТЬ ЭТО ПОЛЕ
+            'CURRENCY_ID',
             BITRIX_FIELDS['client_id'],
             BITRIX_FIELDS['weight'],
             BITRIX_FIELDS['volume'],
@@ -175,13 +273,29 @@ async def get_deal_details(deal_id: str):
 
 
 async def get_deals_by_phone(phone: str):
-    """Получить все сделки по номеру телефона"""
-    client = await find_client_by_phone(phone)
-    if not client:
+    """Получить все сделки по номеру телефона (включая дубли контактов)"""
+    contacts = await find_all_clients_by_phone(phone)
+    if not contacts:
         return None, None
 
-    deals = await get_active_deals(client['ID'])
-    return client, deals
+    # Собираем сделки со всех контактов
+    all_deals = []
+    for contact in contacts:
+        deals = await get_active_deals(contact['ID'])
+        all_deals.extend(deals)
+
+    # Убираем дубли сделок (на всякий случай)
+    seen_deal_ids = set()
+    unique_deals = []
+    for deal in all_deals:
+        if deal['ID'] not in seen_deal_ids:
+            seen_deal_ids.add(deal['ID'])
+            unique_deals.append(deal)
+
+    logger.info(f"Всего уникальных сделок по телефону: {len(unique_deals)}")
+
+    # Возвращаем первый контакт для отображения имени
+    return contacts[0], unique_deals
 
 
 async def send_invoice_to_client(deal_id: str, client_telegram_id: str):
@@ -279,7 +393,6 @@ async def notify_on_document_upload(deal_id: str, doc_type: str = "invoice", adm
             parse_mode="HTML"
         )
 
-        # Если это вызов от админа, отправляем ему уведомление с кнопкой возврата
         if admin_id:
             await bot.send_message(
                 admin_id,
@@ -328,7 +441,6 @@ async def update_deal_menu(message: Message, deal_id: str, state: FSMContext):
 
     keyboard = []
 
-    # Накладная
     if has_invoice:
         keyboard.append([
             InlineKeyboardButton(text="👁 Просмотр накладной", callback_data=f"admin_view_invoice_{deal_id}"),
@@ -337,7 +449,6 @@ async def update_deal_menu(message: Message, deal_id: str, state: FSMContext):
     else:
         keyboard.append([InlineKeyboardButton(text="➕ Добавить накладную", callback_data="admin_add_invoice")])
 
-    # Фото
     if has_photos:
         keyboard.append([
             InlineKeyboardButton(text=f"👁 Просмотр фото ({photo_count})", callback_data=f"admin_view_photos_{deal_id}"),
@@ -390,15 +501,12 @@ def get_orders_keyboard_with_status(orders: list, prefix: str = "order"):
         date = format_date(order.get('DATE_CREATE', ''))
         title = order.get('TITLE', 'Без названия')
 
-        # Ограничиваем длину названия
         if len(title) > 30:
             title = title[:27] + "..."
 
-        # Проверяем наличие документов
         has_doc = os.path.exists(f"{INVOICES_DIR}/{order_id}.pdf")
         has_photo = os.path.exists(f"{PHOTOS_DIR}/{order_id}") and os.listdir(f"{PHOTOS_DIR}/{order_id}")
 
-        # Формируем текст кнопки
         icons = ""
         if has_doc:
             icons += "📄"
@@ -413,6 +521,46 @@ def get_orders_keyboard_with_status(orders: list, prefix: str = "order"):
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
+def get_admin_deals_keyboard(deals: list, page: int = 0) -> InlineKeyboardMarkup:
+    """Клавиатура со списком заказов для админки с пагинацией"""
+    keyboard = []
+    total_deals = len(deals)
+    total_pages = (total_deals + DEALS_PER_PAGE - 1) // DEALS_PER_PAGE
+
+    start_idx = page * DEALS_PER_PAGE
+    end_idx = min(start_idx + DEALS_PER_PAGE, total_deals)
+
+    page_deals = deals[start_idx:end_idx]
+
+    for deal in page_deals:
+        deal_id = deal.get('ID')
+        title = deal.get('TITLE', 'Без названия')
+
+        has_invoice_icon = "✅📄" if os.path.exists(f"{INVOICES_DIR}/{deal_id}.pdf") else "❌📄"
+        has_photo_icon = "✅📸" if os.path.exists(f"{PHOTOS_DIR}/{deal_id}") else "❌📸"
+
+        if len(title) > 25:
+            title = title[:22] + "..."
+
+        text_button = f"#{deal_id} {has_invoice_icon}{has_photo_icon} {title}"
+        keyboard.append([InlineKeyboardButton(text=text_button, callback_data=f"admin_deal_{deal_id}")])
+
+    # Кнопки пагинации
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_page_{page - 1}"))
+        nav_buttons.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="admin_page_info"))
+        if page < total_pages - 1:
+            nav_buttons.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"admin_page_{page + 1}"))
+        keyboard.append(nav_buttons)
+
+    keyboard.append([InlineKeyboardButton(text="🔄 Новый поиск", callback_data="admin_new_search")])
+    keyboard.append([InlineKeyboardButton(text="🚪 Выйти из админки", callback_data="admin_exit")])
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
 async def get_order_details_keyboard(deal_id: str):
     """Клавиатура для деталей заказа"""
     keyboard = []
@@ -420,7 +568,6 @@ async def get_order_details_keyboard(deal_id: str):
     if await has_invoice(deal_id):
         keyboard.append([InlineKeyboardButton(text="📄 Скачать накладную", callback_data=f"invoice_{deal_id}")])
 
-    # Проверяем наличие фото без привязки к стадии
     photos_dir = f"{PHOTOS_DIR}/{deal_id}"
     if os.path.exists(photos_dir):
         photo_count = len(os.listdir(photos_dir))
@@ -448,7 +595,6 @@ async def admin_panel(message: Message, state: FSMContext):
         await message.answer("❌ У вас нет доступа к админ-панели")
         return
 
-    # Сохраняем ID сообщения для последующего редактирования
     sent = await message.answer(
         "🔧 <b>Админ-панель</b>\n\n"
         "Введите номер телефона клиента:\n"
@@ -464,17 +610,13 @@ async def admin_process_phone(message: Message, state: FSMContext):
     """Обработка телефона - показываем клиента и все его заказы"""
     phone = message.text.strip()
 
-    # Удаляем сообщение с телефоном
     await safe_delete_message(message)
 
-    # Очистка телефона от лишних символов
     phone = re.sub(r'[^\d+]', '', phone)
 
-    # Получаем ID сообщения админки
     data = await state.get_data()
     admin_msg_id = data.get('admin_message_id')
 
-    # Обновляем сообщение
     try:
         await bot.edit_message_text(
             "⏳ Ищу клиента...",
@@ -512,10 +654,9 @@ async def admin_process_phone(message: Message, state: FSMContext):
         )
         return
 
-    # Сохраняем данные клиента
-    await state.update_data(client=client, deals=deals, phone=phone)
+    # Сохраняем данные клиента и текущую страницу
+    await state.update_data(client=client, deals=deals, phone=phone, page=0)
 
-    # Формируем информацию о клиенте
     text = (
         f"👤 <b>Клиент найден</b>\n"
         f"📝 {client.get('NAME', '')} {client.get('LAST_NAME', '')}\n"
@@ -524,45 +665,59 @@ async def admin_process_phone(message: Message, state: FSMContext):
         f"Выберите заказ:"
     )
 
-    # Клавиатура с заказами
-    keyboard = []
-    for deal in deals:
-        deal_id = deal.get('ID')
-        title = deal.get('TITLE', 'Без названия')
-
-        # Проверяем наличие документов
-        has_invoice_icon = "✅📄" if os.path.exists(f"{INVOICES_DIR}/{deal_id}.pdf") else "❌📄"
-        has_photo_icon = "✅📸" if os.path.exists(f"{PHOTOS_DIR}/{deal_id}") else "❌📸"
-
-        # Ограничиваем длину названия
-        if len(title) > 25:
-            title = title[:22] + "..."
-
-        text_button = f"#{deal_id} {has_invoice_icon}{has_photo_icon} {title}"
-        keyboard.append([InlineKeyboardButton(text=text_button, callback_data=f"admin_deal_{deal_id}")])
-
-    keyboard.append([InlineKeyboardButton(text="🔄 Новый поиск", callback_data="admin_new_search")])
-    keyboard.append([InlineKeyboardButton(text="🚪 Выйти из админки", callback_data="admin_exit")])
-
     await bot.edit_message_text(
         text,
         chat_id=message.chat.id,
         message_id=admin_msg_id,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+        reply_markup=get_admin_deals_keyboard(deals, page=0),
         parse_mode="HTML"
     )
     await state.set_state(AdminStates.waiting_deal_selection)
 
 
+@dp.callback_query(F.data.startswith("admin_page_"))
+async def admin_change_page(callback: CallbackQuery, state: FSMContext):
+    """Переключение страницы заказов"""
+    if callback.data == "admin_page_info":
+        await callback.answer()
+        return
+
+    page = int(callback.data.split("_")[2])
+    data = await state.get_data()
+
+    client = data.get('client')
+    deals = data.get('deals')
+    phone = data.get('phone')
+
+    if not client or not deals:
+        await callback.answer("❌ Ошибка, начните заново /admin", show_alert=True)
+        return
+
+    await state.update_data(page=page)
+
+    text = (
+        f"👤 <b>Клиент найден</b>\n"
+        f"📝 {client.get('NAME', '')} {client.get('LAST_NAME', '')}\n"
+        f"📱 {phone}\n\n"
+        f"📦 <b>Активные заказы: {len(deals)}</b>\n\n"
+        f"Выберите заказ:"
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_admin_deals_keyboard(deals, page=page),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
 @dp.callback_query(F.data.startswith("admin_deal_"))
 async def admin_select_deal(callback: CallbackQuery, state: FSMContext):
     """Выбор сделки - показываем меню действий"""
-    # Проверяем, были ли загружены фото но не завершена загрузка
     current_state = await state.get_state()
     if current_state == AdminStates.waiting_photos:
         data = await state.get_data()
         photo_messages = data.get('photo_messages', [])
-        # Удаляем незавершенные фото
         for msg_id in photo_messages:
             try:
                 await bot.delete_message(callback.message.chat.id, msg_id)
@@ -653,7 +808,6 @@ async def admin_view_photos(callback: CallbackQuery, state: FSMContext):
         if photos:
             await callback.answer("📸 Отправляю фото...")
             try:
-                # Отправляем фото как альбом
                 media = []
                 for idx, photo_file in enumerate(photos[:10]):
                     photo_path = f"{photos_dir}/{photo_file}"
@@ -670,7 +824,6 @@ async def admin_view_photos(callback: CallbackQuery, state: FSMContext):
 
                 await bot.send_media_group(callback.from_user.id, media)
 
-                # Если фото больше 10, отправляем остальные
                 if len(photos) > 10:
                     for i in range(10, len(photos), 10):
                         batch = photos[i:i + 10]
@@ -701,7 +854,6 @@ async def admin_delete_invoice(callback: CallbackQuery, state: FSMContext):
         os.remove(invoice_path)
         await callback.answer("✅ Накладная удалена")
 
-        # Обновляем меню
         await update_deal_menu(callback.message, deal_id, state)
     else:
         await callback.answer("❌ Файл не найден", show_alert=True)
@@ -718,7 +870,6 @@ async def admin_delete_photos(callback: CallbackQuery, state: FSMContext):
         shutil.rmtree(photos_dir)
         await callback.answer(f"✅ Удалено {photo_count} фото")
 
-        # Обновляем меню
         await update_deal_menu(callback.message, deal_id, state)
     else:
         await callback.answer("❌ Папка не найдена", show_alert=True)
@@ -759,12 +910,12 @@ async def admin_back_to_deals(callback: CallbackQuery, state: FSMContext):
     client = data.get('client')
     deals = data.get('deals')
     phone = data.get('phone')
+    page = data.get('page', 0)
 
     if not client or not deals:
         await callback.answer("❌ Ошибка, начните заново /admin", show_alert=True)
         return
 
-    # Формируем информацию о клиенте
     text = (
         f"👤 <b>Клиент</b>\n"
         f"📝 {client.get('NAME', '')} {client.get('LAST_NAME', '')}\n"
@@ -773,29 +924,9 @@ async def admin_back_to_deals(callback: CallbackQuery, state: FSMContext):
         f"Выберите заказ:"
     )
 
-    # Клавиатура с заказами
-    keyboard = []
-    for deal in deals:
-        deal_id = deal.get('ID')
-        title = deal.get('TITLE', 'Без названия')
-
-        # Проверяем наличие документов
-        has_invoice = "✅📄" if os.path.exists(f"{INVOICES_DIR}/{deal_id}.pdf") else "❌📄"
-        has_photo = "✅📸" if os.path.exists(f"{PHOTOS_DIR}/{deal_id}") else "❌📸"
-
-        # Ограничиваем длину названия
-        if len(title) > 25:
-            title = title[:22] + "..."
-
-        text_button = f"#{deal_id} {has_invoice}{has_photo} {title}"
-        keyboard.append([InlineKeyboardButton(text=text_button, callback_data=f"admin_deal_{deal_id}")])
-
-    keyboard.append([InlineKeyboardButton(text="🔄 Новый поиск", callback_data="admin_new_search")])
-    keyboard.append([InlineKeyboardButton(text="🚪 Выйти из админки", callback_data="admin_exit")])
-
     await callback.message.edit_text(
         text,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+        reply_markup=get_admin_deals_keyboard(deals, page=page),
         parse_mode="HTML"
     )
     await state.set_state(AdminStates.waiting_deal_selection)
@@ -809,7 +940,6 @@ async def admin_process_invoice(message: Message, state: FSMContext):
     deal_id = data['deal_id']
     admin_msg_id = data.get('admin_message_id')
 
-    # Удаляем сообщение с файлом
     await safe_delete_message(message)
 
     os.makedirs(INVOICES_DIR, exist_ok=True)
@@ -821,10 +951,8 @@ async def admin_process_invoice(message: Message, state: FSMContext):
     await bot.download_file(file.file_path, file_path)
     logger.info(f"Накладная сохранена: {file_path}")
 
-    # Автоматическое уведомление клиента
     await notify_on_document_upload(deal_id, "invoice", message.from_user.id)
 
-    # Обновляем админское сообщение с подтверждением и меню заказа
     if admin_msg_id:
         deal = await get_deal_details(deal_id)
         if deal:
@@ -873,7 +1001,6 @@ async def admin_process_invoice(message: Message, state: FSMContext):
                     parse_mode="HTML"
                 )
             except:
-                # Если не удалось отредактировать, отправляем новое
                 await message.answer(
                     text,
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
@@ -888,7 +1015,6 @@ async def admin_process_photo(message: Message, state: FSMContext):
     deal_id = data['deal_id']
     admin_msg_id = data.get('admin_message_id')
 
-    # НЕ удаляем сообщение с фото сразу - сохраняем ID для последующего удаления
     photo_messages = data.get('photo_messages', [])
     photo_messages.append(message.message_id)
     await state.update_data(photo_messages=photo_messages)
@@ -897,18 +1023,16 @@ async def admin_process_photo(message: Message, state: FSMContext):
     os.makedirs(deal_photos_dir, exist_ok=True)
     logger.info(f"Сохраняем фото в: {deal_photos_dir}")
 
-    # Получаем список существующих фото
     existing_photos = os.listdir(deal_photos_dir)
     photo_index = len(existing_photos) + 1
 
     photo = message.photo[-1]
-    file_path = f"{deal_photos_dir}/photo_{photo_index:03d}.jpg"  # Используем 03d для правильной сортировки
+    file_path = f"{deal_photos_dir}/photo_{photo_index:03d}.jpg"
 
     file = await bot.get_file(photo.file_id)
     await bot.download_file(file.file_path, file_path)
     logger.info(f"Фото сохранено: {file_path}")
 
-    # Обновляем счетчик в сообщении
     if admin_msg_id:
         try:
             total_photos = len(os.listdir(deal_photos_dir))
@@ -937,26 +1061,21 @@ async def admin_photos_done(callback: CallbackQuery, state: FSMContext):
     deal_id = data['deal_id']
     photo_messages = data.get('photo_messages', [])
 
-    # Удаляем все сообщения с фото
     for msg_id in photo_messages:
         try:
             await bot.delete_message(callback.message.chat.id, msg_id)
         except:
             pass
 
-    # Очищаем список сообщений с фото
     await state.update_data(photo_messages=[])
 
-    # Подсчитываем загруженные фото
     photos_dir = f"{PHOTOS_DIR}/{deal_id}"
     photo_count = 0
     if os.path.exists(photos_dir):
         photo_count = len(os.listdir(photos_dir))
 
-    # Автоматическое уведомление клиента
     await notify_on_document_upload(deal_id, "photos", callback.from_user.id)
 
-    # Обновляем сообщение с подтверждением и возвращаемся к меню заказа
     deal = await get_deal_details(deal_id)
     if deal:
         title = deal.get('TITLE', 'Без названия')
@@ -1005,7 +1124,6 @@ async def finish_photo_upload(message: Message, state: FSMContext):
     if current_state != AdminStates.waiting_photos:
         return
 
-    # Удаляем сообщение с командой
     await safe_delete_message(message)
 
     data = await state.get_data()
@@ -1013,26 +1131,21 @@ async def finish_photo_upload(message: Message, state: FSMContext):
     admin_msg_id = data.get('admin_message_id')
     photo_messages = data.get('photo_messages', [])
 
-    # Удаляем все сообщения с фото
     for msg_id in photo_messages:
         try:
             await bot.delete_message(message.chat.id, msg_id)
         except:
             pass
 
-    # Очищаем список сообщений с фото
     await state.update_data(photo_messages=[])
 
-    # Подсчитываем загруженные фото
     photos_dir = f"{PHOTOS_DIR}/{deal_id}"
     photo_count = 0
     if os.path.exists(photos_dir):
         photo_count = len(os.listdir(photos_dir))
 
-    # Автоматическое уведомление клиента
     await notify_on_document_upload(deal_id, "photos", message.from_user.id)
 
-    # Возвращаемся к меню заказа
     if admin_msg_id:
         deal = await get_deal_details(deal_id)
         if deal:
@@ -1079,7 +1192,6 @@ async def admin_exit_command(message: Message, state: FSMContext):
     """Быстрый выход из админки командой"""
     current_state = await state.get_state()
 
-    # Проверяем, что мы в админ-состоянии
     if current_state and "AdminStates" in str(current_state):
         await state.clear()
         await message.answer(
@@ -1089,7 +1201,6 @@ async def admin_exit_command(message: Message, state: FSMContext):
             parse_mode="HTML"
         )
     else:
-        # Если не в админке, просто игнорируем
         pass
 
 
@@ -1098,7 +1209,6 @@ async def admin_exit_command(message: Message, state: FSMContext):
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     """Старт бота"""
-    # ВАЖНО: Очищаем состояние (выход из админки если было)
     await state.clear()
 
     user_id = message.from_user.id
@@ -1134,7 +1244,6 @@ async def process_phone(message: Message, state: FSMContext):
             client.get('LAST_NAME', '')
         )
 
-        # Получаем полные данные контакта для email
         email_params = {
             'ID': client['ID']
         }
@@ -1142,7 +1251,6 @@ async def process_phone(message: Message, state: FSMContext):
 
         email_value = 'Не указан'
         if contact_data and 'EMAIL' in contact_data:
-            # EMAIL - это массив, берем первый email
             email_list = contact_data.get('EMAIL', [])
             if email_list and len(email_list) > 0:
                 email_value = email_list[0].get('VALUE', 'Не указан')
@@ -1151,7 +1259,7 @@ async def process_phone(message: Message, state: FSMContext):
             'phone': phone,
             'client_id': client['ID'],
             'name': full_name,
-            'email': email_value  # ← Теперь берем из стандартного поля EMAIL
+            'email': email_value
         }
 
         await message.answer(
@@ -1172,7 +1280,6 @@ async def process_phone(message: Message, state: FSMContext):
             ]),
             parse_mode="HTML"
         )
-
 
 
 async def show_main_menu(message: Message):
@@ -1220,7 +1327,6 @@ async def show_current_orders(callback: CallbackQuery):
     orders = await get_active_deals(user_data['client_id'])
 
     if orders:
-        # Подсчитываем документы
         total_orders = len(orders)
         orders_with_docs = 0
         orders_with_photos = 0
@@ -1271,6 +1377,7 @@ def parse_bitrix_money(value, default=0.0):
     except (ValueError, TypeError):
         return default
 
+
 @dp.callback_query(F.data.startswith("order_"))
 async def show_order_details(callback: CallbackQuery):
     """Детали заказа"""
@@ -1298,20 +1405,16 @@ async def show_order_details(callback: CallbackQuery):
             return default
         return str(value).strip()
 
-    # Название товара из поля TITLE
     title = deal.get('TITLE', 'Без названия')
 
-    # Форматируем текст заказа по новому формату
     text = f"📦 <b>Заказ №{order_id}</b>\n"
     text += f"<b>{title}</b>\n\n"
 
-    # Текущий статус
     stage = deal.get('STAGE_ID', 'UNKNOWN')
     emoji = get_stage_emoji(stage)
     status_name = get_stage_name(stage)
     text += f"<b>Текущий статус:</b> {status_name}\n\n"
 
-    # Основная информация
     product_type_id = get_field('product_category', 'Не указано')
     if product_type_id != 'Не указано':
         product_type = await get_category_name(product_type_id)
@@ -1328,21 +1431,18 @@ async def show_order_details(callback: CallbackQuery):
     insurance = get_field('insurance', 'Не указана')
     text += f"<b>Страховка:</b> {insurance}\n\n"
 
-    # Даты
     send_date = format_date(get_field('expected_send_date', ''))
     text += f"<b>Дата выхода груза:</b> {send_date}\n"
 
     arrival_date = format_date(get_field('expected_arrival_date', ''))
     text += f"<b>Ожидаемая дата прихода:</b> {arrival_date}\n"
 
-    # Новые поля - город прибытия и маркировка груза
     arrival_city = get_field('arrival_city', 'Не указан')
     text += f"<b>Город прибытия:</b> {arrival_city}\n\n"
 
     cargo_marking = get_field('cargo_marking', 'Не указана')
     text += f"<b>Маркировка груза:</b> {cargo_marking}\n\n"
 
-    # Документы
     text += f"<b>Документы:</b>\n"
 
     invoice_status = "✅ Загружена" if await has_invoice(order_id) else "⏳ Ожидается"
@@ -1355,23 +1455,16 @@ async def show_order_details(callback: CallbackQuery):
     photos_status = f"✅ Загружено ({photo_count} шт.)" if photo_count > 0 else "⏳ Ожидаются"
     text += f"Фото: {photos_status}\n\n"
 
-
-    # Финансы
-    # Финансы
     text += f"<b>Финансы:</b>\n"
 
-    # Стоимость товара
     product_cost_raw = get_field('invoice_cost', '0')
     product_cost_value, product_currency = parse_bitrix_money_with_currency(product_cost_raw)
     product_cost_formatted = format_price(product_cost_value, product_currency)
     text += f"Стоимость товара: {product_cost_formatted}\n"
 
-    # Стоимость доставки
     delivery_cost_raw = deal.get('OPPORTUNITY', '0')
-    # Получаем валюту сделки
     deal_currency = deal.get('CURRENCY_ID', 'RUB')
 
-    # OPPORTUNITY приходит без валюты, используем валюту сделки
     try:
         delivery_cost_value = float(str(delivery_cost_raw).replace(',', '.'))
     except:
@@ -1379,7 +1472,6 @@ async def show_order_details(callback: CallbackQuery):
 
     delivery_cost_formatted = format_price(delivery_cost_value, deal_currency)
     text += f"Стоимость доставки: {delivery_cost_formatted}"
-
 
     keyboard = await get_order_details_keyboard(order_id)
 
@@ -1418,17 +1510,14 @@ async def show_product_photos(callback: CallbackQuery):
 
         if photos:
             try:
-                # Сортируем фото по имени для правильного порядка
                 photos = sorted(photos)
 
-                # Отправляем фото как медиа-группу (альбом)
                 media = []
-                for idx, photo_file in enumerate(photos[:10]):  # Ограничение Telegram - максимум 10 фото в альбоме
+                for idx, photo_file in enumerate(photos[:10]):
                     photo_path = f"{local_photos_dir}/{photo_file}"
                     photo = FSInputFile(photo_path)
 
                     if idx == 0:
-                        # Первое фото с подписью
                         media.append(InputMediaPhoto(
                             media=photo,
                             caption=f"📸 <b>Фото товара на складе</b>\n\nЗаказ #{order_id}\nВсего фото: {len(photos)}",
@@ -1437,14 +1526,12 @@ async def show_product_photos(callback: CallbackQuery):
                     else:
                         media.append(InputMediaPhoto(media=photo))
 
-                # Отправляем альбом
                 await bot.send_media_group(
                     callback.from_user.id,
                     media
                 )
                 logger.info(f"Отправлен альбом из {len(media)} фото")
 
-                # Если фото больше 10, отправляем остальные отдельными альбомами
                 if len(photos) > 10:
                     for i in range(10, len(photos), 10):
                         batch = photos[i:i + 10]
@@ -1459,7 +1546,6 @@ async def show_product_photos(callback: CallbackQuery):
                             media
                         )
 
-                # Отправляем сообщение с кнопкой возврата
                 await bot.send_message(
                     callback.from_user.id,
                     f"✅ Отправлено {len(photos)} фото для заказа #{order_id}",
@@ -1587,14 +1673,11 @@ async def show_archive_details(callback: CallbackQuery):
             product_type = 'Не указано'
         text += f"🏷️ <b>Тип товара:</b> {product_type}\n"
 
-        # Исправленная секция финансов
-        # Стоимость товара
         product_cost_raw = get_field('invoice_cost', '0')
         product_cost_value, product_currency = parse_bitrix_money_with_currency(product_cost_raw)
         product_cost_formatted = format_price(product_cost_value, product_currency)
         text += f"💰 <b>Стоимость товара:</b> {product_cost_formatted}\n"
 
-        # Стоимость доставки
         delivery_cost_raw = deal.get('OPPORTUNITY', '0')
         deal_currency = deal.get('CURRENCY_ID', 'RUB')
 
@@ -1652,6 +1735,7 @@ async def consultation(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @dp.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
     """Профиль клиента"""
@@ -1665,7 +1749,7 @@ async def show_profile(callback: CallbackQuery):
     text = f"👤 <b>Профиль клиента</b>\n\n"
     text += f"📝 <b>ФИО:</b> {user_data['name']}\n"
     text += f"📱 <b>Телефон:</b> {user_data['phone']}\n"
-    text += f"✉️ <b>Email:</b> {user_data['email']}\n"  # ← Здесь уже используется правильное значение
+    text += f"✉️ <b>Email:</b> {user_data['email']}\n"
     text += f"🆔 <b>ID клиента:</b> {user_data['client_id']}\n"
 
     await callback.message.edit_text(
